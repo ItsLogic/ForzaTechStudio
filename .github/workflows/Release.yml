@@ -48,6 +48,7 @@ jobs:
           --no-restore
           --output "${{ env.PUBLISH_DIR }}"
           -p:Platform=x64
+          -p:AppendRuntimeIdentifierToOutputPath=false
           -p:PublishProfile=
           -p:WindowsPackageType=None
           -p:SelfContained=false
@@ -59,9 +60,16 @@ jobs:
       - name: Prepare release asset
         shell: pwsh
         run: |
-          $exePath = Join-Path "${{ env.PUBLISH_DIR }}" "ForzaTechStudio.exe"
+          $exePath = Get-ChildItem -Path "${{ env.PUBLISH_DIR }}" -Filter "ForzaTechStudio.exe" -File -Recurse | Select-Object -First 1 -ExpandProperty FullName
           if (-not (Test-Path $exePath)) {
-            throw "Published executable not found at $exePath"
+            Get-ChildItem -Path "${{ env.PUBLISH_DIR }}" -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+            throw "Published executable not found under ${{ env.PUBLISH_DIR }}"
+          }
+
+          $companionFiles = Get-ChildItem -Path (Split-Path $exePath -Parent) -File | Where-Object { $_.Name -ne "ForzaTechStudio.exe" }
+          if ($companionFiles) {
+            $companionFiles | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+            Write-Host "Framework-dependent single-file publish produced companion files; only ForzaTechStudio.exe will be uploaded."
           }
 
           "asset_path=$exePath" >> $env:GITHUB_OUTPUT
