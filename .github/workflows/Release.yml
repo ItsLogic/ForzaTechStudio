@@ -48,6 +48,7 @@ jobs:
           --no-restore
           --output "${{ env.PUBLISH_DIR }}"
           -p:Platform=x64
+          -p:PublishProfile=
           -p:WindowsPackageType=None
           -p:SelfContained=false
           -p:PublishSingleFile=true

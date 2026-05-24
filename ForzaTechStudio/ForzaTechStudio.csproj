@@ -68,7 +68,7 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <TargetPath>granny2_x64.dll</TargetPath>
     </Content>
-    <Content Include="Assets\customcube.png">
+    <Content Update="Assets\Customcube.PNG">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
