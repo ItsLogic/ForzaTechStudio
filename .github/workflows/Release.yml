@@ -49,6 +49,7 @@ jobs:
           --output "${{ env.PUBLISH_DIR }}"
           -p:Platform=x64
           -p:AppendRuntimeIdentifierToOutputPath=false
+          -p:AssemblyName=ForzaTechStudio
           -p:PublishProfile=
           -p:WindowsPackageType=None
           -p:SelfContained=false
