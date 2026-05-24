@@ -1,0 +1,205 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - Main
+    tags-ignore:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CHANGELOG_PATH: docs/changelogs.md
+  PROJECT_PATH: ForzaTechStudio/ForzaTechStudio.csproj
+  PUBLISH_DIR: ${{ github.workspace }}/artifacts/publish
+  RUNTIME_ID: win-x64
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Restore
+        run: dotnet restore "${{ env.PROJECT_PATH }}" --runtime "${{ env.RUNTIME_ID }}"
+
+      - name: Publish
+        run: >-
+          dotnet publish "${{ env.PROJECT_PATH }}"
+          --configuration Release
+          --runtime "${{ env.RUNTIME_ID }}"
+          --no-restore
+          --output "${{ env.PUBLISH_DIR }}"
+          -p:Platform=x64
+          -p:WindowsPackageType=None
+          -p:SelfContained=false
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=none
+          -p:DebugSymbols=false
+
+      - name: Prepare release asset
+        shell: pwsh
+        run: |
+          $exePath = Join-Path "${{ env.PUBLISH_DIR }}" "ForzaTechStudio.exe"
+          if (-not (Test-Path $exePath)) {
+            throw "Published executable not found at $exePath"
+          }
+
+          "asset_path=$exePath" >> $env:GITHUB_OUTPUT
+        id: asset
+
+      - name: Prepare release metadata
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content "${{ env.PROJECT_PATH }}"
+          $version = [string]($project.Project.PropertyGroup.Version | Select-Object -First 1)
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "Version was not found in ${{ env.PROJECT_PATH }}"
+          }
+
+          $previousCommit = git rev-parse "HEAD^" 2>$null
+          $isVersionRelease = $false
+          if ($previousCommit) {
+            $previousProject = (git show "${previousCommit}:${{ env.PROJECT_PATH }}" 2>$null) -join "`n"
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($previousProject)) {
+              [xml]$previousProjectXml = $previousProject
+              $previousVersion = [string]($previousProjectXml.Project.PropertyGroup.Version | Select-Object -First 1)
+              $isVersionRelease = $version -ne $previousVersion
+            } else {
+              $isVersionRelease = $true
+            }
+          } else {
+            $isVersionRelease = $true
+          }
+
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          $notes = [System.Collections.Generic.List[string]]::new()
+
+          function Add-CommitMessages {
+            param(
+              [System.Collections.Generic.List[string]]$Notes,
+              [string[]]$Commits
+            )
+
+            foreach ($commit in $Commits) {
+              $shortHash = git rev-parse --short $commit
+              $message = git log -1 --pretty=%B $commit
+
+              $Notes.Add("### $shortHash")
+              $Notes.Add("")
+              $Notes.Add("```")
+              $Notes.Add(($message -join "`n"))
+              $Notes.Add("```")
+              $Notes.Add("")
+            }
+          }
+
+          if ($isVersionRelease) {
+            $versionChangeCommits = @(git log --format="%H" -- "${{ env.PROJECT_PATH }}")
+            $previousVersionChangeCommit = $null
+
+            for ($i = 1; $i -lt $versionChangeCommits.Count; $i++) {
+              $candidate = $versionChangeCommits[$i]
+              $candidatePrevious = git rev-parse "$candidate^" 2>$null
+              if (-not $candidatePrevious) {
+                $previousVersionChangeCommit = $candidate
+                break
+              }
+
+              $candidateProject = (git show "${candidate}:${{ env.PROJECT_PATH }}" 2>$null) -join "`n"
+              $candidateProjectStatus = $LASTEXITCODE
+              $candidatePreviousProject = (git show "${candidatePrevious}:${{ env.PROJECT_PATH }}" 2>$null) -join "`n"
+              $candidatePreviousProjectStatus = $LASTEXITCODE
+              if ($candidateProjectStatus -ne 0 -or $candidatePreviousProjectStatus -ne 0 -or [string]::IsNullOrWhiteSpace($candidateProject) -or [string]::IsNullOrWhiteSpace($candidatePreviousProject)) {
+                continue
+              }
+
+              [xml]$candidateProjectXml = $candidateProject
+              [xml]$candidatePreviousProjectXml = $candidatePreviousProject
+              $candidateVersion = [string]($candidateProjectXml.Project.PropertyGroup.Version | Select-Object -First 1)
+              $candidatePreviousVersion = [string]($candidatePreviousProjectXml.Project.PropertyGroup.Version | Select-Object -First 1)
+
+              if ($candidateVersion -ne $candidatePreviousVersion) {
+                $previousVersionChangeCommit = $candidate
+                break
+              }
+            }
+
+            if ($previousVersionChangeCommit) {
+              $commitRange = "${previousVersionChangeCommit}..HEAD"
+              $changedFiles = @(git diff --name-only $commitRange)
+              $releaseCommits = @(git log --reverse --format="%H" $commitRange)
+            } else {
+              $changedFiles = @(git diff-tree --no-commit-id --name-only -r HEAD)
+              $releaseCommits = @(git log --reverse --format="%H" HEAD)
+            }
+
+            $notes.Add("Automated release for version $version.")
+            $notes.Add("")
+            $notes.Add("Requires the .NET Desktop Runtime and Windows App Runtime to be installed.")
+            $notes.Add("")
+
+            if ($changedFiles -contains "${{ env.CHANGELOG_PATH }}") {
+              $notes.Add("## Changelog")
+              $notes.Add("")
+              $notes.Add((Get-Content "${{ env.CHANGELOG_PATH }}" -Raw))
+              $notes.Add("")
+            }
+
+            $notes.Add("## Commits Since Last Version Change")
+            $notes.Add("")
+            Add-CommitMessages -Notes $notes -Commits $releaseCommits
+
+            "release_tag=V$version" >> $env:GITHUB_OUTPUT
+            "release_title=ForzaTechStudio V$version" >> $env:GITHUB_OUTPUT
+            "release_args=" >> $env:GITHUB_OUTPUT
+          } else {
+            $commitMessage = git log -1 --pretty=%B
+
+            $notes.Add("Automated prerelease for commit ${{ github.sha }}.")
+            $notes.Add("")
+            $notes.Add("Requires the .NET Desktop Runtime and Windows App Runtime to be installed.")
+            $notes.Add("")
+            $notes.Add("## Commit Message")
+            $notes.Add("")
+            $notes.Add($commitMessage)
+
+            "release_tag=pre-${{ github.sha }}" >> $env:GITHUB_OUTPUT
+            "release_title=Prerelease ${{ github.sha }}" >> $env:GITHUB_OUTPUT
+            "release_args=--prerelease" >> $env:GITHUB_OUTPUT
+          }
+
+          $notes | Set-Content -Path $notesPath -Encoding utf8
+
+          "notes_path=$notesPath" >> $env:GITHUB_OUTPUT
+        id: metadata
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${{ steps.metadata.outputs.release_tag }}"
+          "${{ steps.asset.outputs.asset_path }}"
+          --repo "${{ github.repository }}"
+          --target "${{ github.sha }}"
+          --title "${{ steps.metadata.outputs.release_title }}"
+          --notes-file "${{ steps.metadata.outputs.notes_path }}"
+          ${{ steps.metadata.outputs.release_args }}
